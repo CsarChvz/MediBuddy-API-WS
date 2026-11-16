@@ -3,6 +3,16 @@ package com.meddibuddy.meddibuddy_sockets.entity
 import jakarta.persistence.*
 import java.time.Instant
 
+enum class EstadoToma {
+    PENDIENTE,
+    DISPENSADA,
+    TOMADA,
+    POSPUESTA,
+    NO_CONFIRMADA,
+    TARDIA,
+    ERROR
+}
+
 @Entity
 @Table(name = "devices")
 data class DeviceEntity(
@@ -81,16 +91,34 @@ data class MedicationScheduleEntity(
     val deviceId: String,
 
     @Column(nullable = false)
-    val medicationName: String,
+    var medicationName: String,
 
     @Column(nullable = false)
-    val dose: String,
+    var dose: String,
 
     val compartment: Int = 1,
 
-    val scheduledHour: Int = 8,
+    var scheduledHour: Int = 8,
 
-    val scheduledMinute: Int = 0,
+    var scheduledMinute: Int = 0,
 
-    var isActive: Boolean = true
-)
+    var isActive: Boolean = true // Actividad 2: Atributo para borrado lógico
+) {
+    fun actualizarConfiguracion(clientType: String, nuevoNombre: String, nuevaDosis: String, nuevaHora: Int, nuevoMinuto: Int) {
+        if (clientType != "CUIDADOR") {
+            throw SecurityException("Acceso denegado: Solo el cuidador puede modificar el medicamento.")
+        }
+        this.medicationName = nuevoNombre
+        this.dosis = nuevaDosis
+        this.scheduledHour = nuevaHora
+        this.scheduledMinute = nuevoMinuto
+    }
+
+    // 3. Actividad 2: Borrado lógico del medicamento[cite: 1, 21]
+    fun aplicarBorradoLogico(clientType: String) {
+        if (clientType != "CUIDADOR") {
+            throw SecurityException("Acceso denegado: Solo el cuidador puede eliminar el medicamento.")
+        }
+        this.isActive = false
+    }
+}
