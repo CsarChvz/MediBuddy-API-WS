@@ -2,12 +2,15 @@ package com.meddibuddy.meddibuddy_sockets.service
 
 import com.meddibuddy.meddibuddy_sockets.entity.DeviceCommandEntity
 import com.meddibuddy.meddibuddy_sockets.entity.DeviceEventEntity
+import com.meddibuddy.meddibuddy_sockets.entity.EstadoToma
+import com.meddibuddy.meddibuddy_sockets.entity.MedicationScheduleEntity
 import com.meddibuddy.meddibuddy_sockets.model.ClientType
 import com.meddibuddy.meddibuddy_sockets.model.DeviceMessage
 import com.meddibuddy.meddibuddy_sockets.model.MessageType
 import com.meddibuddy.meddibuddy_sockets.registry.DeviceSessionRegistry
 import com.meddibuddy.meddibuddy_sockets.repository.DeviceCommandRepository
 import com.meddibuddy.meddibuddy_sockets.repository.DeviceEventRepository
+import com.meddibuddy.meddibuddy_sockets.repository.DeviceRepository
 import com.meddibuddy.meddibuddy_sockets.repository.MedicationScheduleRepository
 import org.slf4j.LoggerFactory
 import org.springframework.data.domain.PageRequest
@@ -17,6 +20,7 @@ import org.springframework.web.socket.WebSocketSession
 import tools.jackson.databind.ObjectMapper
 import java.io.IOException
 import java.time.Instant
+import java.time.LocalTime
 import java.util.concurrent.ConcurrentLinkedDeque
 
 @Service
@@ -26,6 +30,7 @@ class EventDispatcherService(
     private val eventRepository: DeviceEventRepository,
     private val commandRepository: DeviceCommandRepository,
     private val scheduleRepository: MedicationScheduleRepository,
+    private val deviceRepository: DeviceRepository,
     private val objectMapper: ObjectMapper
 ) {
     private val logger = LoggerFactory.getLogger(javaClass)
@@ -58,6 +63,9 @@ class EventDispatcherService(
             MessageType.ALERT -> handleAlert(message)
             MessageType.COMMAND -> handleCommand(message, session)
             MessageType.COMMAND_ACK -> handleCommandAck(message)
+            MessageType.MEDICATION_CONFIG -> handleMedicationConfig(message, session)
+            MessageType.MEDICATION_DELETE -> handleMedicationDelete(message, session)
+            MessageType.INTAKE_STATUS -> handleIntakeStatus(message, session)
         }
     }
 
@@ -139,7 +147,6 @@ class EventDispatcherService(
         recordEvent(message)
         persistEvent(message)
 
-        // Lógica de Negocio MediBuddy:
         // 1. Detección de batería baja
         val battery = (message.payload["battery"] as? Number)?.toInt()
         if (battery != null && battery < 20) {
@@ -158,22 +165,13 @@ class EventDispatcherService(
             forwardToSubscribers(alert)
         }
 
-        // 2. Detección de toma de medicamento (pastillero abierto)
+        // 2. Detección de botón físico o apertura de compartimento
+        val buttonPressed = message.payload["buttonPressed"] == true
         val boxOpened = message.payload["pillBoxClosed"] == false || message.payload["pillBoxOpened"] == true
-        if (boxOpened) {
-            val adherenceAlert = DeviceMessage(
-                type = MessageType.ALERT,
-                deviceId = message.deviceId,
-                clientType = ClientType.ESP32,
-                payload = mapOf(
-                    "alertType" to "MEDICATION_TAKEN",
-                    "compartment" to (message.payload["compartment"] ?: 1),
-                    "message" to "Compartimento abierto: Toma de medicamento detectada"
-                )
-            )
-            recordEvent(adherenceAlert)
-            persistEvent(adherenceAlert)
-            forwardToSubscribers(adherenceAlert)
+        val compartment = (message.payload["compartment"] as? Number)?.toInt() ?: 1
+
+        if (buttonPressed || boxOpened) {
+            procesarEventoBotonFisico(message.deviceId, compartment)
         }
 
         forwardToSubscribers(message)
@@ -187,6 +185,25 @@ class EventDispatcherService(
     }
 
     private fun handleCommand(message: DeviceMessage, senderSession: WebSocketSession) {
+        val action = message.payload["action"]?.toString() ?: "UNKNOWN"
+
+        // Enrutamiento de comandos de negocio
+        when (action) {
+            "UPDATE_MEDICATION" -> {
+                handleMedicationConfig(message, senderSession)
+                return
+            }
+            "DELETE_MEDICATION" -> {
+                handleMedicationDelete(message, senderSession)
+                return
+            }
+            "BUTTON_PRESSED" -> {
+                val compartment = (message.payload["compartment"] as? Number)?.toInt() ?: 1
+                procesarEventoBotonFisico(message.deviceId, compartment)
+                return
+            }
+        }
+
         val targetDevice = message.targetDeviceId
         if (targetDevice.isNullOrBlank()) {
             sendJson(senderSession, DeviceMessage(
@@ -198,10 +215,8 @@ class EventDispatcherService(
             return
         }
 
-        val action = message.payload["action"]?.toString() ?: "UNKNOWN"
         val paramsJson = try { objectMapper.writeValueAsString(message.payload) } catch (_: Exception) { "{}" }
 
-        // Persistir comando en DB
         val commandEntity = commandRepository.save(
             DeviceCommandEntity(
                 targetDeviceId = targetDevice,
@@ -242,7 +257,6 @@ class EventDispatcherService(
             ?: message.payload["executedAction"]?.toString()
             ?: ""
 
-        // Actualizar estado en DB
         val pendingCommand = commandRepository.findFirstByTargetDeviceIdAndActionAndStatusOrderByCreatedAtDesc(
             targetDeviceId = message.deviceId,
             action = action,
@@ -255,6 +269,332 @@ class EventDispatcherService(
         }
 
         forwardToSubscribers(message)
+    }
+
+    // ========================================================================
+    // Actividad 2: Lógica de Negocio POO y Reglas de Seguridad
+    // ========================================================================
+
+    /**
+     * Regla 2: Configuración protegida del medicamento.
+     * Invoca los métodos de encapsulamiento POO en MedicationScheduleEntity.
+     * Si el rol es "ADULTO_MAYOR", la entidad lanza SecurityException y aquí se maneja adecuadamente.
+     */
+    fun actualizarConfiguracionMedicamento(
+        scheduleId: Long,
+        clientType: String,
+        nuevoNombre: String,
+        nuevaDosis: String,
+        nuevaHora: Int,
+        nuevoMinuto: Int
+    ): MedicationScheduleEntity {
+        val schedule = scheduleRepository.findById(scheduleId).orElseThrow {
+            NoSuchElementException("No se encontró el horario de medicamento con ID: $scheduleId")
+        }
+
+        // Llamada directa al método de negocio de la entidad POO
+        schedule.actualizarConfiguracion(
+            clientType = clientType,
+            nuevoNombre = nuevoNombre,
+            nuevaDosis = nuevaDosis,
+            nuevaHora = nuevaHora,
+            nuevoMinuto = nuevoMinuto
+        )
+
+        val actualizado = scheduleRepository.save(schedule)
+        logger.info("✅ Medicamento [ID: $scheduleId] actualizado por el rol '$clientType'")
+
+        notificarCambioHorario(actualizado, "MEDICATION_UPDATED")
+        return actualizado
+    }
+
+    /**
+     * Regla 3: Borrado lógico del medicamento.
+     * Cambia isActive = false para preservar historial.
+     * Solo permitido para "CUIDADOR".
+     */
+    fun aplicarBorradoLogicoMedicamento(
+        scheduleId: Long,
+        clientType: String
+    ): MedicationScheduleEntity {
+        val schedule = scheduleRepository.findById(scheduleId).orElseThrow {
+            NoSuchElementException("No se encontró el horario de medicamento con ID: $scheduleId")
+        }
+
+        // Llamada directa al método de encapsulamiento POO
+        schedule.aplicarBorradoLogico(clientType)
+
+        val desactivado = scheduleRepository.save(schedule)
+        logger.info("🗑️ Borrado lógico aplicado al medicamento [ID: $scheduleId] por '$clientType'")
+
+        notificarCambioHorario(desactivado, "MEDICATION_DELETED")
+        return desactivado
+    }
+
+    /**
+     * Regla 1: Transición de estados de la toma (TOMADA vs TARDIA).
+     * Se ejecuta cuando el pastillero físico reporta pulsación del botón.
+     */
+    fun procesarEventoBotonFisico(
+        deviceId: String,
+        compartment: Int,
+        horaActual: LocalTime = LocalTime.now()
+    ): MedicationScheduleEntity? {
+        val schedules = scheduleRepository.findByDeviceIdAndCompartmentAndIsActiveTrue(deviceId, compartment)
+        val schedule = schedules.firstOrNull()
+
+        // Llamada a la regla POO de la entidad si existe un horario programado
+        val nuevoEstado = schedule?.registrarTomaFisica(horaActual) ?: EstadoToma.TOMADA
+        val guardado = schedule?.let { scheduleRepository.save(it) }
+
+        if (guardado != null) {
+            logger.info("💊 Toma procesada para medicamento '${guardado.medicationName}'. Estado resultante: $nuevoEstado a las $horaActual")
+        } else {
+            logger.info("💊 Evento de toma detectado en dispositivo $deviceId (compartimento $compartment) sin horario previo registrado.")
+        }
+
+        val alertPayload = mutableMapOf<String, Any?>(
+            "alertType" to "MEDICATION_TAKEN",
+            "compartment" to compartment,
+            "estadoToma" to nuevoEstado.name,
+            "horaRegistro" to horaActual.toString(),
+            "message" to "Compartimento abierto: Toma de medicamento detectada"
+        )
+        if (guardado != null) {
+            alertPayload["scheduleId"] = guardado.id
+            alertPayload["medicationName"] = guardado.medicationName
+            alertPayload["horaProgramada"] = "${guardado.scheduledHour}:${guardado.scheduledMinute}"
+        }
+
+        val alert = DeviceMessage(
+            type = MessageType.ALERT,
+            deviceId = deviceId,
+            clientType = ClientType.ESP32,
+            payload = alertPayload
+        )
+        recordEvent(alert)
+        persistEvent(alert)
+        forwardToSubscribers(alert)
+
+        return guardado
+    }
+
+    /**
+     * Manejador WebSocket para peticiones de configuración de medicamentos.
+     */
+    private fun handleMedicationConfig(message: DeviceMessage, session: WebSocketSession) {
+        val scheduleId = (message.payload["scheduleId"] as? Number)?.toLong()
+            ?: message.payload["scheduleId"]?.toString()?.toLongOrNull()
+        val medicationName = message.payload["medicationName"]?.toString()
+        val dose = message.payload["dose"]?.toString()
+        val hour = (message.payload["scheduledHour"] as? Number)?.toInt()
+            ?: message.payload["scheduledHour"]?.toString()?.toIntOrNull()
+        val minute = (message.payload["scheduledMinute"] as? Number)?.toInt()
+            ?: message.payload["scheduledMinute"]?.toString()?.toIntOrNull()
+
+        val clientType = resolveClientRole(message)
+
+        if (scheduleId == null || medicationName.isNullOrBlank() || dose.isNullOrBlank() || hour == null || minute == null) {
+            sendJson(session, DeviceMessage(
+                type = MessageType.ALERT,
+                deviceId = "SERVER",
+                clientType = ClientType.SERVER,
+                payload = mapOf(
+                    "status" to "ERROR",
+                    "error" to "Parámetros incompletos (requerido: scheduleId, medicationName, dose, scheduledHour, scheduledMinute)"
+                )
+            ))
+            return
+        }
+
+        try {
+            val actualizado = actualizarConfiguracionMedicamento(
+                scheduleId = scheduleId,
+                clientType = clientType,
+                nuevoNombre = medicationName,
+                nuevaDosis = dose,
+                nuevaHora = hour,
+                nuevoMinuto = minute
+            )
+
+            sendJson(session, DeviceMessage(
+                type = MessageType.COMMAND_ACK,
+                deviceId = "SERVER",
+                clientType = ClientType.SERVER,
+                targetDeviceId = message.deviceId,
+                payload = mapOf(
+                    "status" to "SUCCESS",
+                    "scheduleId" to actualizado.id,
+                    "medicationName" to actualizado.medicationName,
+                    "dose" to actualizado.dose,
+                    "scheduledHour" to actualizado.scheduledHour,
+                    "scheduledMinute" to actualizado.scheduledMinute
+                )
+            ))
+        } catch (e: SecurityException) {
+            // Manejo estricto si es un Adulto Mayor o no autorizado
+            logger.warn("⚠️ Intento no autorizado bloqueado: ${e.message}")
+            sendJson(session, DeviceMessage(
+                type = MessageType.ALERT,
+                deviceId = "SERVER",
+                clientType = ClientType.SERVER,
+                targetDeviceId = message.deviceId,
+                payload = mapOf(
+                    "status" to "FORBIDDEN",
+                    "error" to (e.message ?: "Acceso denegado: Solo el CUIDADOR puede configurar medicamentos"),
+                    "errorCode" to "SECURITY_VIOLATION"
+                )
+            ))
+        } catch (e: Exception) {
+            logger.error("Error al configurar medicamento: ${e.message}")
+            sendJson(session, DeviceMessage(
+                type = MessageType.ALERT,
+                deviceId = "SERVER",
+                clientType = ClientType.SERVER,
+                targetDeviceId = message.deviceId,
+                payload = mapOf("status" to "ERROR", "error" to (e.message ?: "Error interno"))
+            ))
+        }
+    }
+
+    /**
+     * Manejador WebSocket para peticiones de borrado lógico de medicamentos.
+     */
+    private fun handleMedicationDelete(message: DeviceMessage, session: WebSocketSession) {
+        val scheduleId = (message.payload["scheduleId"] as? Number)?.toLong()
+            ?: message.payload["scheduleId"]?.toString()?.toLongOrNull()
+
+        val clientType = resolveClientRole(message)
+
+        if (scheduleId == null) {
+            sendJson(session, DeviceMessage(
+                type = MessageType.ALERT,
+                deviceId = "SERVER",
+                clientType = ClientType.SERVER,
+                payload = mapOf("status" to "ERROR", "error" to "Parámetro 'scheduleId' requerido")
+            ))
+            return
+        }
+
+        try {
+            val desactivado = aplicarBorradoLogicoMedicamento(scheduleId, clientType)
+            sendJson(session, DeviceMessage(
+                type = MessageType.COMMAND_ACK,
+                deviceId = "SERVER",
+                clientType = ClientType.SERVER,
+                targetDeviceId = message.deviceId,
+                payload = mapOf(
+                    "status" to "SUCCESS",
+                    "scheduleId" to desactivado.id,
+                    "isActive" to desactivado.isActive
+                )
+            ))
+        } catch (e: SecurityException) {
+            logger.warn("⚠️ Intento no autorizado de borrado lógico bloqueado: ${e.message}")
+            sendJson(session, DeviceMessage(
+                type = MessageType.ALERT,
+                deviceId = "SERVER",
+                clientType = ClientType.SERVER,
+                targetDeviceId = message.deviceId,
+                payload = mapOf(
+                    "status" to "FORBIDDEN",
+                    "error" to (e.message ?: "Acceso denegado: Solo el CUIDADOR puede eliminar medicamentos"),
+                    "errorCode" to "SECURITY_VIOLATION"
+                )
+            ))
+        } catch (e: Exception) {
+            logger.error("Error al aplicar borrado lógico: ${e.message}")
+            sendJson(session, DeviceMessage(
+                type = MessageType.ALERT,
+                deviceId = "SERVER",
+                clientType = ClientType.SERVER,
+                targetDeviceId = message.deviceId,
+                payload = mapOf("status" to "ERROR", "error" to (e.message ?: "Error interno"))
+            ))
+        }
+    }
+
+    /**
+     * Manejador para transicionar el estado de la toma de manera directa o manual.
+     */
+    private fun handleIntakeStatus(message: DeviceMessage, session: WebSocketSession) {
+        val scheduleId = (message.payload["scheduleId"] as? Number)?.toLong()
+            ?: message.payload["scheduleId"]?.toString()?.toLongOrNull()
+        val nuevoEstadoStr = message.payload["estadoToma"]?.toString()
+
+        if (scheduleId == null || nuevoEstadoStr == null) {
+            sendJson(session, DeviceMessage(
+                type = MessageType.ALERT,
+                deviceId = "SERVER",
+                clientType = ClientType.SERVER,
+                payload = mapOf("status" to "ERROR", "error" to "Parámetros incompletos (scheduleId y estadoToma requeridos)")
+            ))
+            return
+        }
+
+        try {
+            val nuevoEstado = EstadoToma.valueOf(nuevoEstadoStr.uppercase())
+            val schedule = scheduleRepository.findById(scheduleId).orElseThrow {
+                NoSuchElementException("Horario de medicamento no encontrado")
+            }
+            schedule.transicionarEstado(nuevoEstado)
+            val guardado = scheduleRepository.save(schedule)
+
+            sendJson(session, DeviceMessage(
+                type = MessageType.COMMAND_ACK,
+                deviceId = "SERVER",
+                clientType = ClientType.SERVER,
+                targetDeviceId = message.deviceId,
+                payload = mapOf(
+                    "status" to "SUCCESS",
+                    "scheduleId" to guardado.id,
+                    "estadoToma" to guardado.estadoToma.name
+                )
+            ))
+
+            notificarCambioHorario(guardado, "INTAKE_STATUS_UPDATED")
+        } catch (e: Exception) {
+            sendJson(session, DeviceMessage(
+                type = MessageType.ALERT,
+                deviceId = "SERVER",
+                clientType = ClientType.SERVER,
+                payload = mapOf("status" to "ERROR", "error" to (e.message ?: "Error al actualizar estado"))
+            ))
+        }
+    }
+
+    /**
+     * Obtiene el rol del cliente (CUIDADOR vs ADULTO_MAYOR) examinando:
+     * 1. El payload directo del mensaje.
+     * 2. La entidad DeviceEntity registrada en la base de datos para ese deviceId.
+     * 3. El clientType del enum en DeviceMessage.
+     */
+    private fun resolveClientRole(message: DeviceMessage): String {
+        return message.payload["clientType"]?.toString()
+            ?: message.payload["role"]?.toString()
+            ?: deviceRepository.findById(message.deviceId).map { it.clientType }.orElse(message.clientType.name)
+    }
+
+    private fun notificarCambioHorario(schedule: MedicationScheduleEntity, motivo: String) {
+        val notif = DeviceMessage(
+            type = MessageType.ALERT,
+            deviceId = schedule.deviceId,
+            clientType = ClientType.SERVER,
+            payload = mapOf(
+                "alertType" to motivo,
+                "scheduleId" to schedule.id,
+                "medicationName" to schedule.medicationName,
+                "dose" to schedule.dose,
+                "scheduledHour" to schedule.scheduledHour,
+                "scheduledMinute" to schedule.scheduledMinute,
+                "compartment" to schedule.compartment,
+                "estadoToma" to schedule.estadoToma.name,
+                "isActive" to schedule.isActive
+            )
+        )
+        recordEvent(notif)
+        persistEvent(notif)
+        forwardToSubscribers(notif)
     }
 
     fun sendDirectCommand(targetDeviceId: String, action: String, params: Map<String, Any?> = emptyMap()): Boolean {

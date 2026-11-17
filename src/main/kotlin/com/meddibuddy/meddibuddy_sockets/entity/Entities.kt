@@ -2,6 +2,20 @@ package com.meddibuddy.meddibuddy_sockets.entity
 
 import jakarta.persistence.*
 import java.time.Instant
+import java.time.LocalTime
+
+/**
+ * Estados del ciclo de toma de un medicamento según las reglas de negocio de MediBuddy.
+ */
+enum class EstadoToma {
+    PENDIENTE,
+    DISPENSADA,
+    TOMADA,
+    POSPUESTA,
+    NO_CONFIRMADA,
+    TARDIA,
+    ERROR
+}
 
 @Entity
 @Table(name = "devices")
@@ -80,17 +94,90 @@ data class MedicationScheduleEntity(
     @Column(nullable = false)
     val deviceId: String,
 
+    // Campos mutables y configurables por el CUIDADOR
     @Column(nullable = false)
-    val medicationName: String,
+    var medicationName: String,
 
     @Column(nullable = false)
-    val dose: String,
+    var dose: String,
 
     val compartment: Int = 1,
 
-    val scheduledHour: Int = 8,
+    var scheduledHour: Int = 8,
 
-    val scheduledMinute: Int = 0,
+    var scheduledMinute: Int = 0,
 
-    var isActive: Boolean = true
-)
+    // Regla de Negocio: Borrado lógico
+    var isActive: Boolean = true,
+
+    // Regla de Negocio: Estados de la toma
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false)
+    var estadoToma: EstadoToma = EstadoToma.PENDIENTE
+) {
+    /**
+     * Regla de Negocio 2: Configuración protegida.
+     * Solo el rol "CUIDADOR" puede modificar la información del medicamento.
+     * Si el rol es "ADULTO_MAYOR" o cualquier otro distinto de "CUIDADOR", se lanza SecurityException.
+     */
+    fun actualizarConfiguracion(
+        clientType: String,
+        nuevoNombre: String,
+        nuevaDosis: String,
+        nuevaHora: Int,
+        nuevoMinuto: Int
+    ) {
+        if (clientType.equals("ADULTO_MAYOR", ignoreCase = true) || !clientType.equals("CUIDADOR", ignoreCase = true)) {
+            throw SecurityException("Acceso denegado: Solo el usuario con rol 'CUIDADOR' puede modificar la configuración del medicamento. El rol '$clientType' no tiene permisos.")
+        }
+
+        require(nuevoNombre.isNotBlank()) { "El nombre del medicamento no puede estar vacío." }
+        require(nuevaDosis.isNotBlank()) { "La dosis del medicamento no puede estar vacía." }
+        require(nuevaHora in 0..23) { "La hora programada debe estar en el rango de 0 a 23." }
+        require(nuevoMinuto in 0..59) { "El minuto programado debe estar en el rango de 0 a 59." }
+
+        this.medicationName = nuevoNombre
+        this.dose = nuevaDosis
+        this.scheduledHour = nuevaHora
+        this.scheduledMinute = nuevoMinuto
+    }
+
+    /**
+     * Regla de Negocio 3: Borrado lógico.
+     * El medicamento no se elimina físicamente de la base de datos para preservar el historial.
+     * Solo el rol "CUIDADOR" puede ejecutar este borrado lógico (isActive = false).
+     */
+    fun aplicarBorradoLogico(clientType: String) {
+        if (clientType.equals("ADULTO_MAYOR", ignoreCase = true) || !clientType.equals("CUIDADOR", ignoreCase = true)) {
+            throw SecurityException("Acceso denegado: Solo el usuario con rol 'CUIDADOR' puede realizar el borrado lógico del medicamento. El rol '$clientType' no tiene permisos.")
+        }
+        this.isActive = false
+    }
+
+    /**
+     * Transiciona el estado de la toma en base al momento del consumo físico (ej. botón presionado en el ESP32).
+     * Si la toma ocurre después de la hora programada más la ventana de tolerancia (por defecto 30 min),
+     * el estado transiciona a TARDIA; en caso contrario transiciona a TOMADA.
+     */
+    fun registrarTomaFisica(
+        horaActual: LocalTime = LocalTime.now(),
+        ventanaToleranciaMinutos: Long = 30
+    ): EstadoToma {
+        val horaProgramada = LocalTime.of(this.scheduledHour, this.scheduledMinute)
+        val horaLimite = horaProgramada.plusMinutes(ventanaToleranciaMinutos)
+
+        this.estadoToma = if (horaActual.isAfter(horaLimite)) {
+            EstadoToma.TARDIA
+        } else {
+            EstadoToma.TOMADA
+        }
+        return this.estadoToma
+    }
+
+    /**
+     * Permite transicionar manualmente el estado de la toma.
+     */
+    fun transicionarEstado(nuevoEstado: EstadoToma) {
+        this.estadoToma = nuevoEstado
+    }
+}

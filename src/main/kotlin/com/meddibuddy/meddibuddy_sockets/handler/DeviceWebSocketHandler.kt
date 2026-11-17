@@ -11,12 +11,15 @@ import org.springframework.web.socket.TextMessage
 import org.springframework.web.socket.WebSocketSession
 import org.springframework.web.socket.handler.TextWebSocketHandler
 import org.springframework.web.util.UriComponentsBuilder
+import tools.jackson.databind.ObjectMapper
+import java.time.LocalTime
 
 @Component
 class DeviceWebSocketHandler(
     private val sessionRegistry: DeviceSessionRegistry,
     private val securityService: SecurityService,
-    private val eventDispatcherService: EventDispatcherService
+    private val eventDispatcherService: EventDispatcherService,
+    private val objectMapper: ObjectMapper
 ) : TextWebSocketHandler() {
 
     private val logger = LoggerFactory.getLogger(javaClass)
@@ -52,8 +55,67 @@ class DeviceWebSocketHandler(
         }
     }
 
+    /**
+     * Interceptor en el flujo WebSocket:
+     * Intercepta la carga útil entrante antes del procesamiento general para detectar
+     * eventos de hardware en tiempo real (ej. botón físico presionado en el ESP32).
+     * Transiciona el estado de la toma a TOMADA o TARDIA según la hora programada.
+     */
     override fun handleTextMessage(session: WebSocketSession, message: TextMessage) {
-        eventDispatcherService.processIncomingMessage(message.payload, session)
+        val payload = message.payload
+
+        // Intercepta eventos físicos del dispositivo IoT (ESP32)
+        if (isPhysicalButtonEvent(payload)) {
+            interceptAndProcessPhysicalButton(session, payload)
+        }
+
+        // Delegación al despachador de eventos general
+        eventDispatcherService.processIncomingMessage(payload, session)
+    }
+
+    /**
+     * Evalúa si el payload contiene un indicador de botón físico presionado.
+     */
+    private fun isPhysicalButtonEvent(rawPayload: String): Boolean {
+        return rawPayload.contains("\"buttonPressed\":true") ||
+               rawPayload.contains("\"buttonPressed\": true") ||
+               rawPayload.contains("\"PHYSICAL_BUTTON_PRESSED\"") ||
+               rawPayload.contains("\"BUTTON_PRESSED\"")
+    }
+
+    /**
+     * Fragmento Interceptor:
+     * 1. Extrae deviceId y compartimento del hardware.
+     * 2. Obtiene la hora actual.
+     * 3. Invoca la lógica POO de transición de estado en MedicationScheduleEntity:
+     *    - Si la hora actual <= hora programada + 30 min -> EstadoToma.TOMADA
+     *    - Si la hora actual > hora programada + 30 min -> EstadoToma.TARDIA
+     */
+    fun interceptAndProcessPhysicalButton(session: WebSocketSession, payload: String) {
+        try {
+            val rootNode = objectMapper.readTree(payload)
+            val deviceId = rootNode.get("deviceId")?.asText()
+                ?: sessionRegistry.getConnectedDevice(session.id)?.deviceId
+                ?: return
+
+            val payloadNode = rootNode.get("payload")
+            val compartment = payloadNode?.get("compartment")?.asInt() ?: 1
+            val horaActual = LocalTime.now()
+
+            logger.info("🔘 [INTERCEPTOR] Botón físico presionado en pastillero '$deviceId' (compartimento $compartment) a las $horaActual")
+
+            val schedule = eventDispatcherService.procesarEventoBotonFisico(
+                deviceId = deviceId,
+                compartment = compartment,
+                horaActual = horaActual
+            )
+
+            if (schedule != null) {
+                logger.info("🔘 [INTERCEPTOR] Transición de estado exitosa: Medicamento '${schedule.medicationName}', EstadoToma -> ${schedule.estadoToma}")
+            }
+        } catch (e: Exception) {
+            logger.error("Error al procesar intercepción de botón físico: ${e.message}", e)
+        }
     }
 
     override fun afterConnectionClosed(session: WebSocketSession, status: CloseStatus) {
