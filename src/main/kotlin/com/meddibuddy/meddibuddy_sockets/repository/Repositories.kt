@@ -30,4 +30,5 @@ interface DeviceCommandRepository : JpaRepository<DeviceCommandEntity, Long> {
 @Repository
 interface MedicationScheduleRepository : JpaRepository<MedicationScheduleEntity, Long> {
     fun findByDeviceIdAndIsActiveTrue(deviceId: String): List<MedicationScheduleEntity>
+    fun findByDeviceIdAndCompartmentAndIsActiveTrue(deviceId: String, compartment: Int): List<MedicationScheduleEntity>
 }
