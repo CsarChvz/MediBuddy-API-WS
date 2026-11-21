@@ -44,6 +44,13 @@ El servidor estará escuchando en:
 
 ---
 
+## 🧪 Pruebas con cURL
+
+Para ejecutar el flujo completo de pruebas manuales (registro, login, vinculación, medicamentos y comandos), consulta la guía con comandos listos para copiar y pegar:
+👉 **[`PRUEBAS_API_CURL.md`](../PRUEBAS_API_CURL.md)**
+
+---
+
 ## 📡 Protocolo WebSocket
 
 ### Formato de Mensaje JSON
