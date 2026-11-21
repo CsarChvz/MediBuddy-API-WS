@@ -4,13 +4,35 @@ services:
     container_name: meddibuddy-postgres
     restart: always
     environment:
-      POSTGRES_DB: meddibuddy
-      POSTGRES_USER: meddibuddy
-      POSTGRES_PASSWORD: meddibuddy_password
+      POSTGRES_DB: ${POSTGRES_DB:-meddibuddy}
+      POSTGRES_USER: ${POSTGRES_USER:-meddibuddy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-meddibuddy_password}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-meddibuddy} -d ${POSTGRES_DB:-meddibuddy}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Herramienta web para administrar visualmente la BD en http://localhost:5050 (opcional)
+  # Para activarla: docker compose --profile tools up -d
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: meddibuddy-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@meddibuddy.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin1234}
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles:
+      - tools
 
 volumes:
   postgres_data:
