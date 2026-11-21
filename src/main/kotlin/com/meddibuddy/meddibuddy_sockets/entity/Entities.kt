@@ -21,16 +21,16 @@ enum class EstadoToma {
 @Table(name = "devices")
 data class DeviceEntity(
     @Id
-    val deviceId: String,
+    val deviceId: String = "",
 
     @Column(nullable = false)
-    val name: String,
+    val name: String = "",
 
     @Column(nullable = false)
-    val clientType: String,
+    val clientType: String = "",
 
     @Column(nullable = false)
-    val apiKey: String,
+    val apiKey: String = "",
 
     var isOnline: Boolean = false,
 
@@ -47,13 +47,13 @@ data class DeviceEventEntity(
     val id: Long? = null,
 
     @Column(nullable = false)
-    val deviceId: String,
+    val deviceId: String = "",
 
     @Column(nullable = false)
-    val eventType: String,
+    val eventType: String = "",
 
     @Column(columnDefinition = "TEXT", nullable = false)
-    val payloadJson: String,
+    val payloadJson: String = "",
 
     val timestamp: Instant = Instant.now()
 )
@@ -66,16 +66,16 @@ data class DeviceCommandEntity(
     val id: Long? = null,
 
     @Column(nullable = false)
-    val targetDeviceId: String,
+    val targetDeviceId: String = "",
 
     @Column(nullable = false)
-    val issuedBy: String,
+    val issuedBy: String = "",
 
     @Column(nullable = false)
-    val action: String,
+    val action: String = "",
 
     @Column(columnDefinition = "TEXT", nullable = false)
-    val paramsJson: String,
+    val paramsJson: String = "{}",
 
     var status: String = "PENDING",
 
@@ -92,14 +92,14 @@ data class MedicationScheduleEntity(
     val id: Long? = null,
 
     @Column(nullable = false)
-    val deviceId: String,
+    val deviceId: String = "",
 
     // Campos mutables y configurables por el CUIDADOR
     @Column(nullable = false)
-    var medicationName: String,
+    var medicationName: String = "",
 
     @Column(nullable = false)
-    var dose: String,
+    var dose: String = "",
 
     val compartment: Int = 1,
 
@@ -181,3 +181,56 @@ data class MedicationScheduleEntity(
         this.estadoToma = nuevoEstado
     }
 }
+
+@Entity
+@Table(name = "users")
+data class UserEntity(
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    val id: Long? = null,
+
+    @Column(nullable = false, unique = true)
+    val email: String = "",
+
+    @Column(nullable = false)
+    var name: String = "",
+
+    @Column(nullable = false)
+    var passwordHash: String = "",
+
+    @Column(nullable = false)
+    var role: String = "ADULTO_MAYOR", // CUIDADOR | ADULTO_MAYOR
+
+    @Column(nullable = false)
+    var deviceId: String = "",
+
+    var linkedDeviceId: String? = null,
+
+    val createdAt: Instant = Instant.now()
+)
+
+@Entity
+@Table(name = "pairing_codes")
+data class PairingCodeEntity(
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    val id: Long? = null,
+
+    @Column(nullable = false, length = 6)
+    val code: String = "",
+
+    @Column(nullable = false)
+    val caregiverUserId: Long = 0L,
+
+    @Column(nullable = false)
+    val caregiverDeviceId: String = "",
+
+    @Column(nullable = false)
+    val expiresAt: Instant = Instant.now(),
+
+    var isUsed: Boolean = false,
+
+    var usedByUserId: Long? = null,
+
+    val createdAt: Instant = Instant.now()
+)

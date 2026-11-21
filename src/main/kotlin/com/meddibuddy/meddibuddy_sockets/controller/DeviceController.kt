@@ -26,6 +26,18 @@ data class CreateScheduleRequest(
     val scheduledMinute: Int
 )
 
+data class UpdateScheduleRequest(
+    val medicationName: String,
+    val dose: String,
+    val scheduledHour: Int,
+    val scheduledMinute: Int,
+    val clientType: String = "CUIDADOR"
+)
+
+data class UpdateScheduleStatusRequest(
+    val estadoToma: com.meddibuddy.meddibuddy_sockets.entity.EstadoToma
+)
+
 @RestController
 @RequestMapping("/api/v1/devices")
 @CrossOrigin(origins = ["*"])
@@ -106,5 +118,81 @@ class DeviceController(
             isActive = true
         )
         return scheduleRepository.save(schedule)
+    }
+
+    @PutMapping("/{deviceId}/schedules/{scheduleId}")
+    fun updateMedicationSchedule(
+        @PathVariable deviceId: String,
+        @PathVariable scheduleId: Long,
+        @RequestBody req: UpdateScheduleRequest
+    ): ResponseEntity<Any> {
+        val scheduleOpt = scheduleRepository.findById(scheduleId)
+        if (scheduleOpt.isEmpty) {
+            return ResponseEntity.notFound().build()
+        }
+        val schedule = scheduleOpt.get()
+        if (schedule.deviceId != deviceId) {
+            return ResponseEntity.badRequest().body(mapOf("error" to "El medicamento no pertenece al dispositivo indicado."))
+        }
+
+        try {
+            schedule.actualizarConfiguracion(
+                clientType = req.clientType,
+                nuevoNombre = req.medicationName,
+                nuevaDosis = req.dose,
+                nuevaHora = req.scheduledHour,
+                nuevoMinuto = req.scheduledMinute
+            )
+            val updated = scheduleRepository.save(schedule)
+            return ResponseEntity.ok(updated)
+        } catch (e: SecurityException) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(mapOf("error" to e.message))
+        } catch (e: IllegalArgumentException) {
+            return ResponseEntity.badRequest().body(mapOf("error" to e.message))
+        }
+    }
+
+    @DeleteMapping("/{deviceId}/schedules/{scheduleId}")
+    fun deleteMedicationSchedule(
+        @PathVariable deviceId: String,
+        @PathVariable scheduleId: Long,
+        @RequestParam(defaultValue = "CUIDADOR") clientType: String
+    ): ResponseEntity<Any> {
+        val scheduleOpt = scheduleRepository.findById(scheduleId)
+        if (scheduleOpt.isEmpty) {
+            return ResponseEntity.notFound().build()
+        }
+        val schedule = scheduleOpt.get()
+        if (schedule.deviceId != deviceId) {
+            return ResponseEntity.badRequest().body(mapOf("error" to "El medicamento no pertenece al dispositivo indicado."))
+        }
+
+        try {
+            schedule.aplicarBorradoLogico(clientType)
+            scheduleRepository.save(schedule)
+            return ResponseEntity.ok(mapOf("status" to "DELETED", "scheduleId" to scheduleId, "isActive" to false))
+        } catch (e: SecurityException) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(mapOf("error" to e.message))
+        }
+    }
+
+    @PatchMapping("/{deviceId}/schedules/{scheduleId}/status")
+    fun updateScheduleStatus(
+        @PathVariable deviceId: String,
+        @PathVariable scheduleId: Long,
+        @RequestBody req: UpdateScheduleStatusRequest
+    ): ResponseEntity<Any> {
+        val scheduleOpt = scheduleRepository.findById(scheduleId)
+        if (scheduleOpt.isEmpty) {
+            return ResponseEntity.notFound().build()
+        }
+        val schedule = scheduleOpt.get()
+        if (schedule.deviceId != deviceId) {
+            return ResponseEntity.badRequest().body(mapOf("error" to "El medicamento no pertenece al dispositivo indicado."))
+        }
+
+        schedule.transicionarEstado(req.estadoToma)
+        val updated = scheduleRepository.save(schedule)
+        return ResponseEntity.ok(updated)
     }
 }
