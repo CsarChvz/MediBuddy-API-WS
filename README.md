@@ -1,117 +1,200 @@
-# MeddiBudy - Event-Driven WebSocket API (Kotlin / Spring Boot)
+# MediBuddy API & WebSocket Server (Kotlin / Spring Boot 3)
 
-API orientada a eventos construida en **Kotlin** y **Spring Boot 3** diseñada para comunicar en tiempo real dispositivos embebidos (**ESP32**) con aplicaciones móviles (**Android**).
+Servidor backend y plataforma orientada a eventos construida en **Kotlin** con **Spring Boot 3** y **Java 21**. Su objetivo es coordinar la comunicación en tiempo real entre el pastillero inteligente con hardware embebido (**ESP-32**) y la aplicación móvil (**MediBuddy Android**), ofreciendo persistencia de datos, reglas de negocio médicas y seguridad.
 
 ---
 
-## 🏗️ Arquitectura de la Solución
+## 🏗️ Arquitectura del Sistema
 
 ```mermaid
-flowchart LR
-    ESP32["ESP32 (C++/Arduino)\nCliente WebSocket JSON"]
-    Backend["API Kotlin (Spring Boot)\n/ws/events\n- DeviceSessionRegistry\n- EventDispatcher"]
-    Android["App Android\n(Kotlin + OkHttp WebSocket)"]
+flowchart TD
+    subgraph IoT["Pastillero Inteligente (ESP-32)"]
+        ESP["ESP32 Microcontroller\n- Servomotor SG90 (GPIO 19)\n- Buzzer / Alarma (GPIO 18)\n- Sensor Tapa (GPIO 4)\n- Botón Toma (GPIO 5)"]
+    end
 
-    ESP32 -->|1. Envía Telemetría / Alertas| Backend
-    Backend -->|2. Despacha en tiempo real| Android
-    Android -->|3. Envía Comandos (ej. DISPENSE)| Backend
-    Backend -->|4. Rutea al dispositivo| ESP32
-    ESP32 -->|5. Confirma con COMMAND_ACK| Backend
-    Backend -->|6. Notifica confirmación| Android
+    subgraph Backend["API Backend (Kotlin + Spring Boot 3)"]
+        direction TB
+        WS["WebSocket Server (/ws/events)\n- Handshake & Tokens\n- Ping / Pong (20s)"]
+        Dispatcher["EventDispatcherService\n- Reglas de negocio\n- Tolerancia de toma (30 min)"]
+        Registry["DeviceSessionRegistry\n- Sesiones concurrentes"]
+        Security["SecurityService\n- Validación API Key & JWT"]
+        JPA["Spring Data JPA\n- Hibernate ORM"]
+        DB[(PostgreSQL 16 / H2)]
+        AuthREST["AuthController (/api/v1/auth)\n- Register / Login / Pairing"]
+        DeviceREST["DeviceController (/api/v1/devices)\n- Schedules / Commands / History"]
+
+        WS <--> Registry
+        WS <--> Security
+        WS <--> Dispatcher
+        Dispatcher <--> JPA
+        AuthREST <--> JPA
+        DeviceREST <--> JPA
+        JPA <--> DB
+    end
+
+    subgraph Mobile["Aplicación Móvil (Android)"]
+        AndroidApp["App MediBuddy (Kotlin)\n- Retrofit 2 REST Client\n- OkHttp WebSocket Client"]
+    end
+
+    ESP <-->|WebSocket Seguro + API Key| WS
+    AndroidApp <-->|HTTP REST /auth & /devices| Backend
+    AndroidApp <-->|WebSocket Alertas en Vivo| WS
 ```
+
+---
+
+## ⚙️ Configuración y Variables de Entorno (`.env`)
+
+El backend es **100% modular**. Todas las credenciales, puertos y configuraciones se cargan desde variables de entorno. 
+
+El archivo preconfigurado [`.env`](.env) contiene los valores listos para desarrollo local:
+
+| Variable | Descripción | Valor por Defecto |
+| :--- | :--- | :--- |
+| `PORT` | Puerto HTTP del servidor Spring Boot | `8080` |
+| `POSTGRES_DB` | Nombre de la base de datos PostgreSQL | `meddibuddy` |
+| `POSTGRES_USER` | Usuario de base de datos PostgreSQL | `meddibuddy` |
+| `POSTGRES_PASSWORD` | Contraseña de base de datos PostgreSQL | `meddibuddy_password` |
+| `POSTGRES_PORT` | Puerto de PostgreSQL expuesto por Docker | `5432` |
+| `MEDDIBUDDY_API_KEY` | Clave maestra para autenticar dispositivos ESP-32 | `meddibuddy-secret-esp32-key-2026` |
+| `MEDDIBUDDY_JWT_SECRET` | Secreto maestro para tokens de Android | `meddibuddy-jwt-secret-android-token-2026` |
+| `H2_CONSOLE_ENABLED` | Habilita consola H2 en `/h2-console` | `true` |
 
 ---
 
 ## 🚀 Inicio Rápido
 
 ### Requisitos
-* JDK 21
-* Python 3 (para simuladores de prueba, opcional)
+- **JDK:** Java 21 instalado (`java -version`).
+- **Docker y Docker Compose:** Para ejecutar PostgreSQL.
+- **Python 3:** *(Opcional)* para ejecutar simuladores de hardware.
 
-### Compilar y Ejecutar
+---
+
+### Opción 1: Levantar con PostgreSQL en Docker (Recomendado)
 
 ```bash
-# Compilar y ejecutar pruebas unitarias e integración
-./gradlew test
+# 1. Iniciar el contenedor de PostgreSQL 16
+docker compose up -d
 
-# Iniciar servidor en el puerto 8080
-./gradlew bootRun
+# 2. Iniciar la API con el perfil postgres
+./gradlew bootRun --args='--spring.profiles.active=postgres'
 ```
 
-El servidor estará escuchando en:
-* **WebSocket Endpoint:** `ws://localhost:8080/ws/events`
-* **REST API:** `http://localhost:8080/api/v1/devices`
+> **Herramienta visual pgAdmin (Opcional):**  
+> Si deseas administrar la base de datos visualmente en `http://localhost:5050`, levántalo con:  
+> `docker compose --profile tools up -d`  
+> *(Credenciales: `admin@meddibuddy.com` / `admin1234`)*.
 
 ---
 
-## 🧪 Pruebas con cURL
+### Opción 2: Levantar con Base de Datos H2 en Memoria (Prueba Inmediata sin Docker)
 
-Para ejecutar el flujo completo de pruebas manuales (registro, login, vinculación, medicamentos y comandos), consulta la guía con comandos listos para copiar y pegar:
-👉 **[`PRUEBAS_API_CURL.md`](../PRUEBAS_API_CURL.md)**
+```bash
+./gradlew bootRun
+```
+*La base de datos se creará en memoria y la consola web estará en: `http://localhost:8080/h2-console` (JDBC URL: `jdbc:h2:mem:meddibuddy_db`, Usuario: `sa`, Contraseña vacía).*
 
 ---
 
-## 📡 Protocolo WebSocket
+### Opción 3: Ejecutar la Suite de Pruebas Automatizadas
 
-### Formato de Mensaje JSON
-Todos los mensajes intercambiados comparten la misma estructura base:
+```bash
+./gradlew test
+```
+*Ejecuta pruebas unitarias y de integración para autenticación, reglas de negocio de medicamentos y flujo de eventos.*
 
+---
+
+## 📚 Catálogo de Endpoints REST
+
+### 1. Módulo de Autenticación (`/api/v1/auth`)
+
+* **`POST /api/v1/auth/register`**: Registra un nuevo usuario con perfil (`CUIDADOR` o `ADULTO_MAYOR`). Contraseña protegida con SHA-256.
+  ```json
+  {
+    "name": "Laura Cuidadora",
+    "email": "cuidadora@test.com",
+    "password": "password123",
+    "role": "CUIDADOR"
+  }
+  ```
+* **`POST /api/v1/auth/login`**: Valida credenciales y emite el token de sesión.
+* **`POST /api/v1/auth/pairing/generate`**: El cuidador genera un código de vinculación de 6 dígitos (válido por 15 minutos).
+* **`POST /api/v1/auth/pairing/link`**: El adulto mayor ingresa el código de 6 dígitos para asociar ambos dispositivos.
+
+---
+
+### 2. Módulo de Dispositivos y Medicamentos (`/api/v1/devices`)
+
+* **`GET /api/v1/devices`**: Lista todos los dispositivos registrados y su estado en línea (`isOnline`).
+* **`GET /api/v1/devices/{deviceId}/schedules`**: Obtiene los medicamentos activos para el pastillero.
+* **`POST /api/v1/devices/{deviceId}/schedules`**: Programa un nuevo medicamento:
+  ```json
+  {
+    "medicationName": "Losartán 50mg",
+    "dose": "1 tableta",
+    "compartment": 1,
+    "scheduledHour": 20,
+    "scheduledMinute": 0
+  }
+  ```
+* **`PUT /api/v1/devices/{deviceId}/schedules/{scheduleId}`**: Actualización médica. Protegida por regla de negocio: solo el rol `CUIDADOR` puede modificar dosis u horarios.
+* **`DELETE /api/v1/devices/{deviceId}/schedules/{scheduleId}`**: Borrado lógico (`isActive = false`). Solo permitido para `CUIDADOR` para mantener la trazabilidad histórica.
+* **`PATCH /api/v1/devices/{deviceId}/schedules/{scheduleId}/status`**: Actualiza el estado de la dosis (`PENDIENTE`, `DISPENSADA`, `TOMADA`, `POSPUESTA`, `TARDIA`, `ERROR`).
+* **`POST /api/v1/devices/{deviceId}/command`**: Envía una orden directa al pastillero:
+  ```json
+  {
+    "action": "DISPENSE_MEDICATION",
+    "params": { "compartment": 1 }
+  }
+  ```
+* **`GET /api/v1/devices/{deviceId}/history`**: Historial de los últimos eventos del dispositivo.
+* **`GET /api/v1/devices/{deviceId}/commands`**: Historial de comandos enviados y estado de ejecución física.
+
+---
+
+## 📡 Protocolo WebSocket (`/ws/events`)
+
+### Conexión Handshake
+- **ESP-32:** `ws://<HOST>:8080/ws/events?deviceId=ESP32_MED_01&clientType=ESP32&apiKey=meddibuddy-secret-esp32-key-2026`
+- **Android:** `ws://<HOST>:8080/ws/events?deviceId=USER_ANDROID_01&clientType=ANDROID&token=...`
+
+### Estructura Estándar de Mensaje JSON
 ```json
 {
-  "type": "TELEMETRY | ALERT | COMMAND | COMMAND_ACK | SUBSCRIBE | UNSUBSCRIBE | PING | PONG | CONNECT",
-  "deviceId": "ID_DEL_EMISOR",
-  "clientType": "ESP32 | ANDROID | WEB | SERVER",
-  "targetDeviceId": "ID_DEL_DESTINO (opcional)",
+  "type": "CONNECT | SUBSCRIBE | TELEMETRY | ALERT | COMMAND | COMMAND_ACK | PING | PONG",
+  "deviceId": "string (Emisor)",
+  "clientType": "ESP32 | ANDROID | SERVER",
+  "targetDeviceId": "string (Opcional, receptor)",
   "payload": {
     "clave": "valor"
   }
 }
 ```
 
-### Tipos de Mensajes:
-1. **`CONNECT`**: Registro inicial de un dispositivo o app.
-2. **`SUBSCRIBE`**: Una app Android se suscribe a los eventos de un ESP32 (`targetDeviceId: "ESP32_MED_01"` o `"*"` para todos).
-3. **`TELEMETRY`**: El ESP32 emite datos periódicos (batería, estado de sensores, etc.).
-4. **`ALERT`**: El ESP32 o servidor emite una alerta prioritaria (ej. botón de pánico, dosis omitida).
-5. **`COMMAND`**: La app Android envía una orden al ESP32 (ej. dispensar medicamento, encender zumbador).
-6. **`COMMAND_ACK`**: El ESP32 confirma que ejecutó la orden física.
+### Reglas de Negocio Automatizadas en el Servidor
+1. **Detección Automática de Adherencia:** Cuando el ESP32 envía una alerta física de botón presionado (`buttonPressed: true`), el backend calcula si la toma ocurrió dentro de la ventana de tolerancia (30 min) y transiciona el estado a `TOMADA` o `TARDIA`, notificando de inmediato a la app del cuidador.
+2. **Detección de Batería Baja:** Si la telemetría reporta batería menor a 20%, se genera una alerta prioritaria `LOW_BATTERY` dirigida al cuidador.
 
 ---
 
-## 🧪 Pruebas con Simuladores
+## 🧪 Pruebas y Simuladores
 
-Se incluyen scripts en Python para probar la comunicación sin necesidad del hardware físico:
-
-1. **Simulador ESP32:**
+1. **Guía Rápida de Comandos cURL**:  
+   Consulta [PRUEBAS_API_CURL.md](../PRUEBAS_API_CURL.md) con el ciclo completo de comandos para copiar y pegar.
+2. **Simuladores en Python**:
    ```bash
-   ./scripts/simulate_esp32.py
-   ```
-   * Se conecta, emite telemetría periódica y escucha comandos.
+   # En una terminal (simula el pastillero físico):
+   python3 scripts/simulate_esp32.py
 
-2. **Simulador Android:**
-   ```bash
-   ./scripts/simulate_android.py
+   # En otra terminal (simula la app Android):
+   python3 scripts/simulate_android.py
    ```
-   * Se conecta, se suscribe al ESP32, muestra eventos en consola y envía un comando de prueba (`DISPENSE_MEDICATION`).
 
 ---
 
-## 🔌 Guías de Integración
-
-* **ESP32 (C++/Arduino):** Ver ejemplo completo en [`docs/esp32_example.ino`](docs/esp32_example.ino) usando la librería `arduinoWebSockets` y `ArduinoJson`.
-* **Android (Kotlin):** Ver ejemplo de `AndroidWebSocketManager` en [`docs/android_kotlin_example.kt`](docs/android_kotlin_example.kt) usando `OkHttp WebSocket` y `Kotlin Flow`.
-
----
-
-## 🌐 Endpoints REST de Diagnóstico
-
-* `GET /api/v1/devices`: Lista de dispositivos conectados en tiempo real.
-* `GET /api/v1/devices/{deviceId}/history`: Historial de los últimos eventos del dispositivo.
-* `POST /api/v1/devices/{deviceId}/command`: Enviar un comando directo al ESP32 vía HTTP:
-  ```json
-  {
-    "action": "BUZZER_ON",
-    "params": { "durationMs": 1000 }
-  }
-  ```
-# MediBuddy-API-WS
+## 📚 Documentación Técnica Detallada
+- [GUIA_INTEGRACION_API_APP_ESP32.md](../GUIA_INTEGRACION_API_APP_ESP32.md): Manual completo con esquemas para ESP32, despliegue en servidor (Docker/Nginx) y diagramas.
+- [DOCUMENTATION.md](DOCUMENTATION.md): Documentación de arquitectura interna.
+- [REPORTE_CAMBIOS.md](../REPORTE_CAMBIOS.md): Registro histórico de cambios del proyecto.
